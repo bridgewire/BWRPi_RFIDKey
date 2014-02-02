@@ -2,8 +2,6 @@
 
 class rfid_key
 {
-  protected $debug = true;
-  protected $good_checksum = false;
   protected $hexdigits = array();
   protected $withdashes = '';
   protected $rawkey = '';
@@ -52,10 +50,17 @@ class rfid_key
         $sum = 0;
         $checksum = hexdec( $matches[7] );
         $frmtkey = "";
+
+        $this->hexdigits = array();
+
         for( $i = 2; $i < 7; $i++ )
         {
           $this->hexdigits[] = $matches[$i];
+
+          # to check the key's validity we xor the first 5 bytes
           $sum ^= hexdec( $matches[$i] );
+
+          # create the 'withdashes' member
           $frmtkey .= ($i > 2 ? '-' : '').$matches[$i] ;
         }
         $this->hexdigits[] = $matches[7];
