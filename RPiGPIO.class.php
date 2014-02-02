@@ -1,4 +1,23 @@
 <?PHP
+/* Author: Christiana Johnson
+ * Copyright 2014
+ * License: GPL v2  (it's a standard. look it up.)
+ *
+ * This class is for use in raspbian on a standard Raspberry Pi.
+ * Example:
+ * 
+ * # export gpio 0, setting its type to 'out', then set the pin value high.
+ * $g = new RPiGPIO( 0, 'out' );
+ * $g->export();
+ * $g->write_value( 1 );
+ *
+ * The pin will remain in whatever state it is given, even after your
+ * program ends, until its state is otherwise changed.
+ *
+ * XXX This class makes no attempt to handle resource contention.  i.e. we 
+ * don't flock anything, we don't create lock files... none of that.
+ *
+ * */
 
 class RPiGPIO
 {
@@ -10,10 +29,13 @@ class RPiGPIO
 
   protected $vfile_handle;
 
-  public function __construct( $pin_no = 0, $direction = 'in' )
+  public function __construct( $pinno = 0, $drctn = 'in' )
   {
-    $this->drctn = $direction;
-    $this->pinn  = $pin_no;
+    if( $pinno !== 0    && $pinno !== 1     ) throw new exception("invalid arg: pinno === $pinno, must be type int");
+    if( $drctn !== 'in' && $drctn !== 'out' ) throw new exception("invalid arg: drctn === $drctn");
+
+    $this->drctn = $drctn;
+    $this->pinn  = $pinno;
     $this->d = '/sys/class/gpio/gpio'.$this->pinn;
   }
 
@@ -101,8 +123,8 @@ class RPiGPIO
   {
     $wrtn = false;
 
-    if( $val != 0 && $val != 1 )
-      throw new exception("invalid argument: $val");
+    if( $val !== 0 && $val !== 1 )
+      throw new exception("invalid arg: $val must be int in:{0,1}");
 
     if( $this->open() )
     {
@@ -144,5 +166,5 @@ class RPiGPIO
   }
 }
 
-/* vim: set ai et tabstop=4  shiftwidth=4: */
+/* vim: set ai et tabstop=2  shiftwidth=2: */
 ?>
