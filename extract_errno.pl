@@ -1,5 +1,14 @@
 #!/usr/bin/perl -w
 
+# Author: Christiana Johnson
+# Copywrite 2014
+#
+# The purpose of this is to look-up and map locally accurate errno values to
+# their ordinary names as given in 'man errno'. It requires the ability to run
+# "man errno" and to run the gcc preprocessor. Also requires File::Temp and the
+# ability to use it to create a temporary file. The output is only given on
+# stdout.  runs without arguments.
+
 use strict;
 use warnings;
 use File::Temp;
@@ -15,6 +24,10 @@ if( length($nb) )
 {
   print $ofh "#include <errno.h>\n\nint main() {\n";  # begin C file.
 
+  # run: $ man -t errno | perl -wpe 'chomp'
+  # to take a look at what this program parses.
+  # XXX  this is undoubtedly quite brittle, unfortunately.  if you know a
+  # better way please tell me.
   while( length($nb) > 0 )
   {
     if( $nb =~ s/F1\((E[\sA-Z]*)\)108(.+?)F0(.*)$/$3/ )
@@ -26,6 +39,7 @@ if( length($nb) )
       if( $#g > -1 ) { $f1 .= join("",@g); }
       $f1 =~ s/\s//g;
 
+      # 'zing' is a silly marker to ease later parsing.
       print $ofh "    printf(\"zing: $f1\", $f1);\n" ;
     }
     else
