@@ -1,23 +1,114 @@
 <?
 
-require_once("php_serial.class.php");
-require_once("RPiGPIO.class.php");
-require_once("rfid_key.class.php");
+/* Author: Christiana Johnson ("Author" is losely applied here.)
+ * Copyright 2014
+ * License GPL v2
+ *
+ * This is a scratch file.  I'm checking it in just to share my thoughts.
+ * I like the row-oriented database stuff because it seems like the most 
+ * important web operations apply to single rows. Even when lists of rows are 
+ * displayed on a page only one row is edited at a time (mostly).  Also, I like 
+ * auto-increment columns everywhere unless some other key *really* makes a lot 
+ * more sense, such as, perhaps in this case, the RFID keys we're working with.  
+ * So, I like abstract row classes that handle auto-incremented primary key 
+ * columns by default. I'm wondering how useful this will be now.  not sure.
+ *
+ */
 
 
-class RFID_BadKey_Exception extends Exception {};
-
-abstract class bw_db_table_row
+class bwdb_connection
 {
-  protected $primarykey_value = null;
-  protected $primarykey_name = null;
+  private $db_host = 'localhost';
+  private $db_name = 'Bridgewiremembers';
+  private $db_user = 'root';                 // XXX
+  private $db_pass = '';
+
+  protected $dbh = NULL;
+
+  // singleton instanciator
+  public static function instance()
+  {
+    static $inst = null;
+    if( $inst === null )
+      $inst = new bwdb_connection();
+
+    return $inst; // return a copy
+  }
+
+  // public function prepare( $s )  { return $this->dbh->prepare( $s, array(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true) ); }
+  public function prepare( $s )  { return $this->dbh->prepare( $s ); }
+  public function query( $s )  { return $this->dbh->query( $s ); }
+  public function lastInsertId() { return $this->dbh->lastInsertId(); }
+
+  // yes, it's a singleont, even though they're "evil". all coding is evil by degree.
+  protected function __construct()
+  {
+    $PDOinitializer = 'mysql:host='.$this->db_host.';dbname='.$this->db_name;
+    $this->dbh = new PDO( $PDOinitializer, $this->db_user, $this->db_pass ); 
+    $this->dbh->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);  // use exceptions to handle all errors
+  }
+}
+
+/*
+  public function member_lookup_byRFID( $key )
+  {
+    $mmbr_id = null;
+    $mmbr_secondary_id = null;
+
+    $sql = 'select mmbr_id, mmbr_secondary_id from cardkey where RFID = ?';
+    $stmt = $this->dbh->prepare( $sql );
+
+    $stmt->bindColumn( 'mmbr_id', $mmbr_id );
+    $stmt->bindColumn( 'mmbr_secondary_id', $mmbr_secondary_id );
+
+    $stmt->execute( array( "$key" ) );  // uses $key->__toString() as argument to execute.
+
+    return new bw_member( $mmbr_id, $mmbr_secondary_id, $key );
+  }
+
+  public function fetch_mmbr_id_etc_from_rfid( $key, &$mmbr_id, &$mmbr_secondary_id )
+  {
+    $sql = 'select mmbr_id, mmbr_secondary_id from cardkey where RFID = ?';
+    $stmt = $this->dbh->prepare( $sql );
+
+    $stmt->execute( array( "$key" ) );  // uses $key->__toString() as argument to execute.
+
+    $stmt->bindColumn( 'mmbr_id',           $mmbr_id );
+    $stmt->bindColumn( 'mmbr_secondary_id', $mmbr_secondary_id );
+
+    $stmt->fetch( PDO::FETCH_BOUND );
+  }
+
+
+  public function update_useful_vars()
+  {
+    $sql = 'select @yr:=year(now()) as yr, @mn:=month(now()) as mn, @dayone:=date(concat(@yr,"-",@mn,"-01")) as dayone';
+    $stmt = $this->query($sql);
+    $stmt->closeCursor(); // flush all possible open-ended things
+
+    $sql = 'select @scndthurs := date(concat(@yr,"-",@mn,"-",'.
+            '7 + (if(5 - date_format(@dayone, "%w") <= 0, 12 - date_format(@dayone, "%w"), 5 - date_format(@dayone, "%w"))))) as scndthurs';
+    $stmt = $this->query($sql);
+    $stmt->closeCursor(); // flush all possible open-ended things
+  }
+*/
+
+
+abstract class bwdb_table_row
+{
+  // this class (hopefully) makes it easy to focus on data rather than on sql.
+  // The model is row-centric, as opposed to cursor table centric though this
+  // class may be useful in implementing some kind of cursor-centric class.
+
+  protected $primarykey_value = null;  // the column value of the primary key column
+  protected $primarykey_name = null;   // the primary key column name
   protected $table_name = null;
 
-  protected $nonkey_colnames;
-  protected $colon_colnames;
-  protected $nonkey_colvalues;
+  protected $nonkey_colnames;  // column names, excluding primary key
+  protected $colon_colnames;   // same as nonkey_colnames except each name is prepended with ':'
+  protected $nonkey_colvalues; // actual data values for the columns listed in nonkey_colnames
 
-  protected $refresh_sql = '';
+  protected $refresh_sql = ''; // these are the commands that allow data operations
   protected $insert_sql = '';
   protected $update_sql = '';
 
@@ -46,7 +137,7 @@ abstract class bw_db_table_row
     if( $this->primarykey_value === null )
       throw new Exception( __CLASS__.'::refresh_from_db() requires a non-null primary key value to fetch a row' );
 
-    $dbh = bw_db_connection::instance();
+    $dbh = bwdb_connection::instance();
 
     $stmt = $dbh->prepare( $this->refresh_sql );
 
@@ -58,7 +149,7 @@ abstract class bw_db_table_row
 
   public function insert_into_db()
   {
-    $dbh = bw_db_connection::instance();
+    $dbh = bwdb_connection::instance();
 
     $stmt = $dbh->prepare( $this->insert_sql );
 
@@ -72,7 +163,7 @@ abstract class bw_db_table_row
 
   public function replace_into_db()
   {
-    $dbh = bw_db_connection::instance();
+    $dbh = bwdb_connection::instance();
 
     $stmt = $dbh->prepare( $this->insert_sql );
 
@@ -85,7 +176,7 @@ abstract class bw_db_table_row
   }
 }
 
-class cardkey_log_entry extends bw_db_table_row
+class cardkey_log_entry extends bwdb_table_row
 {
   // make these public so that we can do: $stmt->setFetchMode( PDO::FETCH_INTO, $this );
 /*
@@ -111,19 +202,18 @@ class cardkey_log_entry extends bw_db_table_row
 
   public function __construct( $cklog_id = null ) 
   { 
-
     $this->refresh_sql = 'select cardkey_log_id, RFID, mmbr_id, mmbr_secondary_id, stamp, event, note '.
-                          ' from cardkey where cardkey_log_id = ?'
+                          ' from cardkey where cardkey_log_id = ?';
 
     $this->colon_colnames = preg_replace('/^/', ':', $this->nonkey_colnames ); // prepend all colnames with a colon.
 
-    $update_cols = preg_replace();
-    $nonkey_colnames
+    //$update_cols = preg_replace();
+    //$nonkey_colnames
 
     $cnstr = implode( ', ', $this->nonkey_colnames );
     $colcol_str = implode( ', ', $this->colon_colnames );
 
-    $this->refresh_sql = 'select '.$cnstr.' from '.$this->table_name.' where '.$this->primarykey_name.' = ? '
+    $this->refresh_sql = 'select '.$cnstr.' from '.$this->table_name.' where '.$this->primarykey_name.' = ? ';
     $this->insert_sql = 'insert into '.$this->table_name.' ( '.$cnstr.' ) values ( '.$colcol_str.' ) ';
     $this->update_sql = 'update '.$this->table_name.' set ';
     for( $i=0; $i < count( $this->nonkey_colnames ); $i++ )
@@ -156,7 +246,7 @@ class cardkey_log_entry extends bw_db_table_row
   {
     $this->set_values( $rfid, $mmbr_id, $mmbr_secondary_id, $event, $note );
 
-    $dbh = bw_db_connection::instance();
+    $dbh = bwdb_connection::instance();
 
     $sql = 'insert into cardkey_log ( RFID, mmbr_id, mmbr_secondary_id, event, note ) '.
            'values ( :rfid, :mmbr_id, :mmbr_scdry_id, :event, :note )';
@@ -183,7 +273,7 @@ class cardkey_log_entry extends bw_db_table_row
     if( $this->cardkey_log_id === null )
       return false;  // or throw
 
-    $dbh = bw_db_connection::instance();
+    $dbh = bwdb_connection::instance();
 
     $sql = 'select cardkey_log_id, RFID, mmbr_id, mmbr_secondary_id, stamp, event, note from cardkey_log where cardkey_log_id = ?';
     $stmt = $dbh->prepare( $sql );
@@ -221,7 +311,7 @@ class door_lock_criteria
     $this->event_type = 'nograce';
     $this->mmbr = $m;
 
-    $dbh = bw_db_connection::instance();
+    $dbh = bwdb_connection::instance();
 
     if( ! $m->get_rfid_is_attached() )
     {
@@ -305,7 +395,7 @@ class door_lock_criteria
   public function passes_unlock_criteria() { return $this->may_open_door; }
 }
 
-class bw_member extends bw_db_table_row
+class bw_member extends bwdb_table_row
 {
   // make these public so that we can do: $stmt->setFetchMode( PDO::FETCH_INTO, $this );
   public $mmbr_id = null;
@@ -351,7 +441,7 @@ class bw_member extends bw_db_table_row
   {
     $this->rfidkey = $key;
 
-    $dbh = bw_db_connection::instance();
+    $dbh = bwdb_connection::instance();
 
     if( $mmbr_id === null )
       $dbh->fetch_mmbr_id_etc_from_rfid( $key, $mmbr_id, $mmbr_secondary_id );
@@ -360,210 +450,6 @@ class bw_member extends bw_db_table_row
     $this->mmbr_secondary_id = $mmbr_secondary_id;
   }
 }
-
-
-class RFID_Reader
-{
-  protected $lockgpio;
-  protected $locked = true;
-  protected $lock_time = null;     // an absolute future time-stamp when the door should lock. Ev is a better way.
-  protected $dooropentime = 0;
-
-  protected $lock_EvTimer = null;
-  protected $RFID_EvIo = null;
-
-  protected $RFID_serial = null;
-
-  const GPIO_OPENDOOR = 1;
-  const GPIO_LOCKDOOR = 0;
-
-  public function __construct()
-  {
-    $this->RFID_serial = new phpSerial();
-    if( ! $this->RFID_serial->confPort( "/dev/ttyAMA0", 9600 ) )
-      throw new Excption("RFID_serial::confPort() failed");
-
-    $this->RFID_serial->deviceOpen();
-    $this->RFID_serial->confBlocking( false ); // non-blocking
-
-    $this->lockgpio = new RPiGPIO( 2, "out" );
-    $this->lockgpio->export();
-    $this->lock_door();
-  }
-
-  public function is_locked() { return $this->locked; }
-
-  public function unlock_door()
-  {
-    $d = new DateTime; error_log( $d->format("Y-m-d H:i:s").' :: running unlock door' );
-    $this->lockgpio->write_value( RFID_Reader::GPIO_OPENDOOR );
-    $this->locked = false;
-    $this->lock_time = time() + 10;
-    $this->lock_EvTimer = new EvTimer( 3, 0, function($tmr) { $tmr->data->lock_door(); }, $this );
-  }
-
-  public function lock_door()
-  {
-    $d = new DateTime; error_log( $d->format("Y-m-d H:i:s").' :: running lock door' );
-    $this->lockgpio->write_value( RFID_Reader::GPIO_LOCKDOOR );
-    $this->lock_time = null;
-    $this->locked = true;
-  }
-
-
-  public function open_door_if_member_allowed( $mmbr )
-  {
-    $crtra = new door_lock_criteria();
-    $crtra->check_members_access( $mmbr );
-
-    if( $crtra->passes_unlock_criteria() )
-      $this->unlock_door();
-
-    $crtra->log_event();
-  }
-
-  public function add_RFID_read_handler()
-  {
-    $this->RFID_EvIo = new EvIo(
-
-        $this->RFID_serial->getFilehandle(),
-
-        Ev::READ,
-
-        function( $io, $revents )          // this anonymous function is the handler
-        {
-          static $key = null;
-
-          try
-          {
-            if( $key === null )
-              $key = "";
-
-            $key .= $this->RFID_serial->readPort( 1024, null );
-
-            if( strlen( $key ) >= 16 )
-            {
-              $k = new rfid_key ( $key ); // throws an exception if the key is badly formed
-              if( $k->key_is_valid() )
-              {
-                $found = $k->lookup_rfid();
-
-                $m = new bw_member( $k );
-
-                // '$io->data' is 'this', an instance of 'RFID_Reader'
-                $io->data->open_door_if_member_allowed( $m ); // this function logs the event
-
-                $key = null;
-              }
-              else
-              {
-                error_log( "bad key: ".$e );
-                $crtra = new door_lock_criteria();
-                $crtra->set_key_is_invalid( "invalid key: $key" );
-                $crtra->log_event();
-
-                $key = null;
-              }
-            }
-          }
-          catch( Exception $e )
-          {
-            error_log( "exception: ".$e );
-            $crtra = new door_lock_criteria();
-            $crtra->set_key_is_invalid( "exception generated while processing key: $key" );
-            $crtra->log_event();
-            $key = null;
-
-            // this sleep doesn't hurt. it helps handle the case where all calls throw an exception.
-            sleep(1); 
-          }
-        },
-
-        $this
-    );          // new EvIo
-  }
-}
-
-class bw_db_connection
-{
-  protected $dbh = NULL;
-
-  // singleton instanciator
-  public static function instance()
-  {
-    static $inst = null;
-    if( $inst === null )
-      $inst = new bw_db_connection();
-
-    return $inst; // return a copy
-  }
-
-  // public function prepare( $s )  { return $this->dbh->prepare( $s, array(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true) ); }
-  public function prepare( $s )  { return $this->dbh->prepare( $s ); }
-  public function query( $s )  { return $this->dbh->query( $s ); }
-  public function lastInsertId() { return $this->dbh->lastInsertId(); }
-
-  protected function __construct()
-  {
-    $this->dbh = new PDO('mysql:host=localhost;dbname=BridgewireMembers', 'root', ''); 
-    $this->dbh->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);  // use exceptions to handle all errors
-  }
-
-  public function member_lookup_byRFID( $key )
-  {
-    $mmbr_id = null;
-    $mmbr_secondary_id = null;
-
-    $sql = 'select mmbr_id, mmbr_secondary_id from cardkey where RFID = ?';
-    $stmt = $this->dbh->prepare( $sql );
-
-    $stmt->bindColumn( 'mmbr_id', $mmbr_id );
-    $stmt->bindColumn( 'mmbr_secondary_id', $mmbr_secondary_id );
-
-    $stmt->execute( array( "$key" ) );  // uses $key->__toString() as argument to execute.
-
-    return new bw_member( $mmbr_id, $mmbr_secondary_id, $key );
-  }
-
-  public function fetch_mmbr_id_etc_from_rfid( $key, &$mmbr_id, &$mmbr_secondary_id )
-  {
-    $sql = 'select mmbr_id, mmbr_secondary_id from cardkey where RFID = ?';
-    $stmt = $this->dbh->prepare( $sql );
-
-    $stmt->execute( array( "$key" ) );  // uses $key->__toString() as argument to execute.
-
-    $stmt->bindColumn( 'mmbr_id',           $mmbr_id );
-    $stmt->bindColumn( 'mmbr_secondary_id', $mmbr_secondary_id );
-
-    $stmt->fetch( PDO::FETCH_BOUND );
-  }
-
-
-  public function update_useful_vars()
-  {
-    $sql = 'select @yr:=year(now()) as yr, @mn:=month(now()) as mn, @dayone:=date(concat(@yr,"-",@mn,"-01")) as dayone';
-    $stmt = $this->query($sql);
-    $stmt->closeCursor(); // flush all possible open-ended things
-
-    $sql = 'select @scndthurs := date(concat(@yr,"-",@mn,"-",'.
-            '7 + (if(5 - date_format(@dayone, "%w") <= 0, 12 - date_format(@dayone, "%w"), 5 - date_format(@dayone, "%w"))))) as scndthurs';
-    $stmt = $this->query($sql);
-    $stmt->closeCursor(); // flush all possible open-ended things
-  }
-}
-
-
-
-
-
-
-if( preg_grep( '/^(--daemonize|-d)$/', $argv ) ) { error_log('debug: theoretically we daemonize here.'); }
-
-$door = new RFID_Reader();
-
-$door->add_RFID_read_handler();
-
-Ev::run();
 
 
 /*
@@ -678,7 +564,6 @@ class rfid_key
   }
 }
 */
-
 
 /* vim: set ai et tabstop=2  shiftwidth=2: */
 ?>
