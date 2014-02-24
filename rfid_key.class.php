@@ -1,19 +1,17 @@
 <?
 
+/*
+ * Author: Christiana Johnson
+ * Copyright 2014
+ * License GPL v2
+ */
+
 class rfid_key
 {
   protected $hexdigits = array();
   protected $withdashes = '';
   protected $rawkey = '';
   protected $valid_checksum = false;
-
-  // every rfid key is, or soon will be, associated with an owner, and is
-  // (will be) thus associated with a member id and potentially a
-  // secondary-member id too. memeberships expire with a grace period, etc.');
-
-  protected $mmbr_id;
-  protected $mmbr_secondary_id;
-  protected $expired_days_count;
 
   public function __toString() { return $this->withdashes; }
   public function get_key()    { return $this->withdashes; }
@@ -75,28 +73,7 @@ class rfid_key
     }
     return $this->valid_checksum;
   }
-
-  public function lookup_rfid()
-  {
-    $found = false;
-    if( $this->valid_checksum )
-    {
-      $mmbr_id = null;
-      $mmbr_secondary_id = null;
-
-      $sql = 'select mmbr_id, mmbr_secondary_id from cardkey where RFID = ?';
-      $stmt = $this->dbh->prepare( $sql );
-
-      $stmt->bindColumn( 'mmbr_id', $this->mmbr_id );
-      $stmt->bindColumn( 'mmbr_secondary_id', $this->mmbr_secondary_id );
-
-      $found = $stmt->execute( array( $this->withdashes ) );
-    }
-    return $found;
-  }
 }
-
-
 
 /* vim: set ai et tabstop=2  shiftwidth=2: */
 ?>

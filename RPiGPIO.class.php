@@ -6,8 +6,8 @@
  * This class is for use in raspbian on a standard Raspberry Pi.
  * Example:
  * 
- * # export gpio 0, setting its type to 'out', then set the pin value high.
- * $g = new RPiGPIO( 0, 'out' );
+ * # export gpio 2, setting its type to 'out', then set the pin value high.
+ * $g = new RPiGPIO( 2, 'out' );
  * $g->export();
  * $g->write_value( 1 );
  *
@@ -29,10 +29,17 @@ class RPiGPIO
 
   protected $vfile_handle;
 
-  public function __construct( $pinno = 0, $drctn = 'in' )
+  public function __construct( $pinno, $drctn = 'in' )
   {
-    if( $pinno !== 0    && $pinno !== 1     ) throw new exception("invalid arg: pinno === $pinno, must be type int");
-    if( $drctn !== 'in' && $drctn !== 'out' ) throw new exception("invalid arg: drctn === $drctn");
+    // are there really 53 GPIOs?  no, some seem to be missing and many of 
+    // these are tied to what is probably perminant hardware, so they likely 
+    // should be used, but we need some half-reasonable constraints while not 
+    // making unnecessary restrictions.  the class-user knows best.
+    if( ! is_int( $pinno ) ||  $pinno < 1 || $pinno > 53 )
+      throw new exception("invalid arg: pinno === $pinno. req: 1<=pinno<=53");
+
+    if( $drctn !== 'in' && $drctn !== 'out' )
+      throw new exception("invalid gpio direction selected: drctn === $drctn");
 
     $this->drctn = $drctn;
     $this->pinn  = $pinno;
