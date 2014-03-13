@@ -1,13 +1,13 @@
 <?
 
 require_once('RPiGPIO.class.php');
-//require_once('rfid_key.class.php');
 require_once('RFIDResource.php');
-//require_once('php_serial.class.php');
+require_once('bwdb_rowdefs.php'); // 
+
 
 class FrontDoorLock extends RPiGPIO
 {
-  protected $unlock_duration = 10; // seconds
+  protected $unlock_duration = 7; // seconds
 
   const GPIO_OPENDOOR = 1;
   const GPIO_LOCKDOOR = 0;
@@ -20,7 +20,6 @@ class FrontDoorLock extends RPiGPIO
     parent::__construct(  $gpio_pin, "out"  );
     $this->export();
     $this->lock_door();
-
   }
 
   public function is_locked() { return $this->locked; }
@@ -44,10 +43,116 @@ class FrontDoorLock extends RPiGPIO
   }
 }
 
+abstract class ResourceLockCriteria {}
+
+class FrontDoorLockCriteria extends ResourceLockCriteria
+{
+  protected $key = null;
+
+  public function __construct( rfid_key $rfid )
+  {
+    $this->key = $rfid;
+  }
+
+  public function should_open( &$ckr )
+  {
+    error_log( "running should_open() with key: ".$this->key->get_key() );
+
+    $do_unlock     = false;
+
+    $ckr = new cardkey_row( $this->key->get_key() );
+    print "cardkey_row: $ckr";
+
+    if( $ckr->found_in_db() )
+    {
+      $use_override  = false;
+      $now_date      = new DateTime();
+
+      $exp    = $ckr->g('expires');
+      $or     = $ckr->g('override');
+      $or_exp = $ckr->g('override_expires');
+
+      // check override first. if override exists and isn't expired then then it is all that matters.
+      if( $or !== null )
+      {
+        if( $or_exp !== null ) // null is treated as an expired override
+        {
+          $or_expire_date = new DateTime( $or_exp );
+
+          if( $or_expire_date >= $now_date )
+          {
+            // not expired.  use the override
+            $use_override = true;
+            switch( $or )
+            {
+            case 'u': // unlock the door
+              $do_unlock = true;
+              break;
+            case 'l': // keep the door locked
+              $do_unlock = false;
+              break;
+            default:
+              error_log('uknown override type: '.$or);
+              $do_unlock = false;
+              break;
+            }
+          }
+        }
+      }
+
+      if( ! $use_override )
+      {
+        $expire_date = new DateTime( $exp );           // if expire date is in the future unlock,
+        $do_unlock   = ( $expire_date >= $now_date );  // otherwise let it remain locked.
+      }
+    }
+
+    return $do_unlock;
+  }
+}
+
+class FrontDoorLog
+{
+  public function __construct() {;}
+
+  public function log_dooropen_event( rfid_key $e, cardkey_row $cr )
+  {
+    error_log('door unlocked');
+    print "$e,\n\ncardkey_row $cr\n";
+
+    $ccl = new cardkey_log_row();
+
+    $v = array( 'RFID' => "$e", 'event' => 'unlocked' );
+    try { $v['mmbr_id']           = $cr->g('mmbr_id');           } catch(Exception $e){}
+    try { $v['mmbr_secondary_id'] = $cr->g('mmbr_secondary_id'); } catch(Exception $e){}
+    try { $v['override']          = $cr->g('override');          } catch(Exception $e){}
+
+    $ccl->set_col_values( $v );
+
+    $ccl->do_insert();
+  }
+
+  public function log_doordeny_event( rfid_key $e, cardkey_row $cr )
+  {
+    error_log('unlock request denied');
+    print "$e,\n\ncardkey_row $cr\n";
+
+    $ccl = new cardkey_log_row();
+
+    $v = array( 'RFID' => "$e", 'event' => 'denied' );
+    try { $v['mmbr_id']           = $cr->g('mmbr_id');           } catch(Exception $e){}
+    try { $v['mmbr_secondary_id'] = $cr->g('mmbr_secondary_id'); } catch(Exception $e){}
+    try { $v['override']          = $cr->g('override');          } catch(Exception $e){}
+
+    $ccl->set_col_values( $v );
+    $ccl->do_insert();
+  }
+}
+
 class FrontDoorContoller implements RFIDResourceController
 {
   const CTRLSTATE_NOMINAL = 0;
-  const CTRLSTATE_ADMIN   = 1; // allow key-override control through RFID reader.
+  const CTRLSTATE_ADMIN   = 1; // allow key-override control through RFID reader. not implemented.
 
   protected $controller_state = self::CTRLSTATE_NOMINAL;
   protected $lock;
@@ -56,39 +161,51 @@ class FrontDoorContoller implements RFIDResourceController
   {
     $this->fdlock = new FrontDoorLock();       // this is a GPIO
     $this->rfidrd = new RFID_Reader( $this );  // this contains a ttyS*-reading handler
+    $this->fdlog  = new FrontDoorLog();
   }
 
 
-  public function run_contol_loop()
+  public function run_control_loop()
   {
     $this->rfidrd->add_RFID_read_handler();
     Ev::run();                                 // Ev::run() never returns.
   }
 
 
-  public function receive_rfid_event( RFIDEvent $e )
+  // this is a call-back, that which implements the interface defined by
+  // RFIDResourceController. RFID_Reader will call this whenever it receives an 
+  // RFID from the reading device.
+  //
+  public function receive_rfid_event( rfid_key $e )
   {
     $fid = 'STUB: '.__CLASS__.'::'.__FUNCTION__;
-	  if( ! $e->key_is_valid() ) // this means the key is useable, not that it's known.
-
+	  if( $e->key_is_valid() ) // key is well-formed. next, check authorization
     {
-      error_log($fid.' received badly-formed key');
-/*
-                $crtra = new door_lock_criteria();
-                $crtra->set_key_is_invalid( "invalid key: $key" );
-                $crtra->log_event();
+      error_log($fid.' received well-formed key: '.$e);
 
-                $key = null;
-*/
-    }
-    else
-    {
-      error_log($fid.' received well-formed key');
+      $c = new FrontDoorLockCriteria( $e );
+
+      error_log("4");
 
       switch( $this->controller_state )
       {
       case self::CTRLSTATE_NOMINAL:
-        $this->fdlock->unlock_door();
+
+        error_log("3");
+        $cardkey_row=null;
+
+        if( $c->should_open( $cardkey_row ) )
+        {
+          error_log("1");
+          $this->fdlock->unlock_door();
+          $this->fdlog->log_dooropen_event( $e, $cardkey_row );
+        }
+        else
+        {
+          error_log("2");
+          $this->fdlog->log_doordeny_event( $e, $cardkey_row );
+        }
+
         break;
       case self::CTRLSTATE_ADMIN:  // this is worth while?  too much trouble?
         break;
@@ -103,6 +220,17 @@ class FrontDoorContoller implements RFIDResourceController
       $io->data->open_door_if_member_allowed( $m ); // this function logs the event
 
       $key = null;
+*/
+    }
+    else
+    {
+      error_log($fid.' received badly-formed key');
+/*
+                $crtra = new door_lock_criteria();
+                $crtra->set_key_is_invalid( "invalid key: $key" );
+                $crtra->log_event();
+
+                $key = null;
 */
     }
   }

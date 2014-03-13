@@ -12,20 +12,24 @@ class rfid_key
   protected $withdashes = '';
   protected $rawkey = '';
   protected $valid_checksum = false;
+  protected $is_bad_key = false;
 
   public function __toString() { return $this->withdashes; }
   public function get_key()    { return $this->withdashes; }
   public function get_rawkey() { return $this->rawkey; }
 
-  public function __construct( $key_string=null )
+  public function __construct( $key_string=null, $key_is_bad=false )
   {
-    $this->set_key_string( $key_string );
+    $this->set_key_string( $key_string, $key_is_bad );
   }
 
-  public function set_key_string( $key_string )
+  public function set_key_string( $key_string, $key_is_bad=false )
   {
+    $this->is_bad_key = $key_is_bad;
+    $this->rawkey = $key_string;
+
     $this->valid_checksum = false;
-    if( $key_string !== null )
+    if( $key_string !== null && ! $this->is_bad_key )
       $this->parse_key( $key_string );
   }
 
@@ -43,8 +47,6 @@ class rfid_key
       $pattern = '/\002(([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2}))\r\n\003/i';
       if( preg_match($pattern, $key, $matches ) )
       {
-        $this->rawkey = $matches[1];
-
         $sum = 0;
         $checksum = hexdec( $matches[7] );
         $frmtkey = "";

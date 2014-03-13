@@ -3,22 +3,9 @@
 require_once('rfid_key.class.php');
 require_once('php_serial.class.php');
 
-class RFIDEvent extends rfid_key               // requires rfid_key.class.php
-{
-  public $bad_key_data = null;
-
-  public function __construct( $key_string=null, $isbadkey=false )
-  {
-    if( $isbadkey )
-      $this->bad_key_data = $key_string;
-
-    parent::__construct($key_string);
-  }
-}
-
 interface RFIDResourceController
 {
-  public function receive_rfid_event( RFIDEvent $e );
+  public function receive_rfid_event( rfid_key $e );
 }
 
 class RFID_Reader
@@ -60,7 +47,16 @@ class RFID_Reader
 
           if( $this->RFID_serial->readPort( $key ) && strlen( $key ) >= 16 )
           {
-            $this->controller->receive_rfid_event( new RFIDEvent( $key ) );
+            try
+            {
+              $this->controller->receive_rfid_event( new rfid_key( $key ) );
+            }
+            catch ( Exception $e )
+            {
+              error_log( $e->getMessage() );
+              error_log( print_r($e->getTrace(), true) );
+            }
+
             $key = null; // reset key data after handled event
           }
         },
