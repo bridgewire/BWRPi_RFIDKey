@@ -2,10 +2,6 @@
 
 require_once('FrontDoor.php');
 
-if( preg_grep( '/^(--daemonize|-d)$/', $argv ) )
-  error_log('debug: theoretically we daemonize here.');
-
-
 $frontdoor = new FrontDoorContoller();
 $frontdoor->run_control_loop();           // this never returns
 

@@ -7,7 +7,7 @@ require_once('bwdb_rowdefs.php'); //
 
 class FrontDoorLock extends RPiGPIO
 {
-  protected $unlock_duration = 7; // seconds
+  protected $unlock_duration = 3; // seconds
 
   const GPIO_OPENDOOR = 1;
   const GPIO_LOCKDOOR = 0;
@@ -15,7 +15,7 @@ class FrontDoorLock extends RPiGPIO
   protected $locked = true;
   protected $lock_EvTimer = null;
 
-  public function __construct( $gpio_pin = 2 )
+  public function __construct( $gpio_pin = 23 )
   {
     parent::__construct(  $gpio_pin, "out"  );
     $this->export();
@@ -54,57 +54,166 @@ class FrontDoorLockCriteria extends ResourceLockCriteria
     $this->key = $rfid;
   }
 
-  public function should_open( &$ckr )
+  protected function do_override( $ckr, &$do_unlock, &$reason )
+  {
+    $use_override         = false;
+    $now_date             = new DateTime();
+    $override_code        = null;
+    $override_expire_date = null;
+
+    $ckr->g('override', $override_code);
+    $ckr->g('override_expires', $override_expire_date);
+
+    // check override first. if override exists and isn't expired then then it is all that matters.
+    if( $override_code !== null )
+    {
+      if( $override_expire_date !== null ) // null is treated as an expired override
+      {
+        $or_expire_date = new DateTime( $override_expire_date );
+
+        if( $or_expire_date >= $now_date )
+        {
+          $use_override = true;   // override isn't expired. use the override
+          $do_unlock = false;      // default is leave the door locked.
+
+          switch( $override_code )
+          {
+          case 'u': // unlock the door
+            $do_unlock = true;
+            $reason = 'override';
+            break;
+
+          case 'l': // keep the door locked
+            $reason = 'override';
+            break;
+
+          default:
+            error_log('uknown override type: '.$override_code);
+
+            $use_override = false;  // never mind.  don't use the override.
+            break;
+          }
+        }
+      }
+    }
+
+    return $use_override;
+  }
+
+  public function should_open( &$ckr, &$reason )
   {
     $do_unlock = false;
+    $reason = 'unknown key';
 
-    $ckr = new cardkey_row( $this->key->get_key() );
+    $k = $this->key->get_key();
+    $ckr = new cardkey_row( $k );
+
+    // if( ! $ckr->found_in_db() ) { $do_unlock = false; $reason = 'unknown key'; } else...
 
     if( $ckr->found_in_db() )
     {
-      $use_override  = false;
-      $now_date      = new DateTime();
+      $expire_date = null;
+      $ckr->g('expires', $expire_date);
 
-      $exp    = $ckr->g('expires');
-      $or     = $ckr->g('override');
-      $or_exp = $ckr->g('override_expires');
-
-      // check override first. if override exists and isn't expired then then it is all that matters.
-      if( $or !== null )
+      // before we do a proper check using expiration, look for an override.
+      if( ! $this->do_override( $ckr, $do_unlock, $reason ) )
       {
-        if( $or_exp !== null ) // null is treated as an expired override
-        {
-          $or_expire_date = new DateTime( $or_exp );
+        // override code didn't find the disposition of the RFID,
+        // so now we find the disposition using the expiration date.
 
-          if( $or_expire_date >= $now_date )
+        if( $expire_date === null )
+        {
+          # XXX  is this the right thing?  this is too dangerous, I think.
+          # we need to cleanup our RFID database.
+
+          $reason = 'grandfathered';
+          error_log("key ($k) in db but no expiration date. assuming access is granted.");
+          $do_unlock = true;
+        }
+        else
+        {
+          $now_date   = new DateTime();
+          $exp_date   = new DateTime( $expire_date );
+
+          if( $exp_date >= $now_date )  // simple case: expire date is in the future.
           {
-            // not expired.  use the override
-            $use_override = true;
-            switch( $or )
+            $do_unlock = true;
+            $reason = 'good standing';
+          }
+          else
+          {
+            // the rule, in general, is that dues must be paid by the second Thursday of the month.
+            // so get the appropriate second-thursday relative to the expiration date.
+
+            $second_thursday = $this->heuristic_nearby_second_thursday( $exp_date );
+
+            // this is a date-time stamp and is set to the first moment of the correct day.
+            // the real expiration happens when Thursday ends however, so add 24 hours.
+            $second_thursday->add( new DateInterval("P1D") );
+
+            #error_log( 'using second_thursday == '.$second_thursday->format( DateTime::RFC2822 ) );
+            #error_log( '  and now_date        == '.$now_date->format( DateTime::RFC2822 ) );
+
+            if( $second_thursday >= $now_date )
             {
-            case 'u': // unlock the door
               $do_unlock = true;
-              break;
-            case 'l': // keep the door locked
+              $reason = 'grace period';
+            }
+            else
+            {
               $do_unlock = false;
-              break;
-            default:
-              error_log('uknown override type: '.$or);
-              $do_unlock = false;
-              break;
+              $reason = 'expired: '.$exp_date->format('Y/m/d');
             }
           }
         }
       }
-
-      if( ! $use_override )
-      {
-        $expire_date = new DateTime( $exp );           // if expire date is in the future unlock,
-        $do_unlock   = ( $expire_date >= $now_date );  // otherwise let it remain locked.
-      }
     }
 
     return $do_unlock;
+  }
+
+  public function heuristic_nearby_second_thursday( DateTime $expiration )
+  {
+    // we have a couple problems.
+
+    // The first is that the expiration day may not be precisely on the first
+    // day of the month. Since the grace period ends on the second Thursday we
+    // need to make sure we have an appropriate year and month. The first day
+    // of the month is a good starting point for the "second thursday"
+    // calculation, but what is a valid and fair "nearest" 1st-day-of-the-month
+    // expiration day?  We don't want to elevate past expirations too much.
+    // i.e. if the stated expiration day is 15 or even 10 days before the first
+    // of month, do we want to give that member 10 or 15 extra grace days
+    // beyond the standard grace period?  I'll just say "no" to this question,
+    // and choose, somewhat arbitrarily, the "middle ground" number of '5'.
+
+    $exp = clone $expiration;                // $expiration is a shallow copy, or reference. protect original
+
+                                             // make sure the expiration date is the first day of the month
+    $exp->add( new DateInterval('P5D') );    // add 5 days.  5 is an arbitrary small number.
+    $y    = $exp->format("Y");               // get a integer year.
+    $m    = $exp->format("n");               // get a integer month.
+
+    $secthurs="$y-$m-";                      // beginning our target, second-thursday
+
+    $exp  = new DateTime( $secthurs.'1' );   // this is the functional account expiration date
+
+    // Next problem. Once we have a good-enough 1st-day-of-the-month-expiration
+    // date, then we want to find the second Thursday of the month with respect
+    // to that. the algorithm below does this. get a calendar out and prove it
+    // to yourself.
+
+
+    $athurs = new DateTime('2014-03-06');   // any Thursday will do
+    $thursn = (int)($athurs->format('N'));  // PHP's idea of Thursday's position in a week. (it's 4.)
+    $edow   = (int)($exp->format('N'));     // get the expiration's day of week. like thursn
+
+    if( $edow <= $thursn )
+      $secthurs .= ( 8 + $thursn - $edow);       // $d = 'Y-M-01' + (interval: (7 + ($thursn - $edow)) days);
+    else
+      $secthurs .= (15 + $thursn - $edow);       // $d = 'Y-M-01' + (interval: (14 - ($edow - $thursn)) days);
+
+    return new DateTime( $secthurs );            // return the second thursday as a DateTime object
   }
 }
 
@@ -112,31 +221,32 @@ class FrontDoorLog
 {
   public function __construct() {;}
 
-  public function log_dooropen_event( rfid_key $e, cardkey_row $cr )
+  public function log_door_event( rfid_key $e, $logtype, $reason, cardkey_row $cr=null, $note=null )
   {
     $ccl = new cardkey_log_row();
 
-    $v = array( 'RFID' => "$e", 'event' => 'unlocked' );
-    try { $v['mmbr_id']           = $cr->g('mmbr_id');           } catch(Exception $e){}
-    try { $v['mmbr_secondary_id'] = $cr->g('mmbr_secondary_id'); } catch(Exception $e){}
-    try { $v['override']          = $cr->g('override');          } catch(Exception $e){}
+    # get the values for mmbr_id, mmbr_secondary_id, and override from $cr
+    $v = array( 'mmbr_id' => null, 'mmbr_secondary_id' => null, 'override' => null );
+    if( $cr != null )
+      $cr->get_col_values( $v );
 
+    # set the remaining values in $v for the log
+    $v['rfid'] = "$e";
+    $v['event'] = $logtype;
+    $v['reason'] = $reason;
+    if( $note !== null )
+      $v['note'] = $note;
+
+    # save the log entry
     $ccl->set_col_values( $v );
-
     $ccl->do_insert();
   }
 
-  public function log_doordeny_event( rfid_key $e, cardkey_row $cr )
+  public function log_dooropen_event( rfid_key $e, $rsn, cardkey_row $cr=null, $note=null ) { $this->log_door_event( $e, 'unlocked', $rsn, $cr, $note ); }
+  public function log_doordeny_event( rfid_key $e, $rsn, cardkey_row $cr=null, $note=null )
   {
-    $ccl = new cardkey_log_row();
-
-    $v = array( 'RFID' => "$e", 'event' => 'denied' );
-    try { $v['mmbr_id']           = $cr->g('mmbr_id');           } catch(Exception $e){}
-    try { $v['mmbr_secondary_id'] = $cr->g('mmbr_secondary_id'); } catch(Exception $e){}
-    try { $v['override']          = $cr->g('override');          } catch(Exception $e){}
-
-    $ccl->set_col_values( $v );
-    $ccl->do_insert();
+    $this->log_door_event( $e, 'denied', $rsn, $cr, $note );   
+    if( $rsn == 'unknown key' ) { error_log('denied unknown key: '.$e); }
   }
 }
 
@@ -169,6 +279,9 @@ class FrontDoorContoller implements RFIDResourceController
   //
   public function receive_rfid_event( rfid_key $e )
   {
+    static $most_recent_result = null;
+    static $rcvd_badlyformed_intandem_count = 0;
+
 	  if( $e->key_is_valid() ) // key is well-formed. next, check authorization
     {
       $c = new FrontDoorLockCriteria( $e );
@@ -176,26 +289,53 @@ class FrontDoorContoller implements RFIDResourceController
       switch( $this->controller_state )
       {
       case self::CTRLSTATE_NOMINAL:
-
         $cardkey_row=null;
+        $reason=null;
 
-        if( $c->should_open( $cardkey_row ) )
+        if( $c->should_open( $cardkey_row, $reason ) )
         {
           $this->fdlock->unlock_door();
-          $this->fdlog->log_dooropen_event( $e, $cardkey_row );
+          $this->fdlog->log_dooropen_event( $e, $reason, $cardkey_row );
+          $most_recent_result = RFIDResourceController::CTRLRFIDRSLT_GRANT;
         }
         else
         {
-          $this->fdlog->log_doordeny_event( $e, $cardkey_row );
+          $this->fdlog->log_doordeny_event( $e, $reason, $cardkey_row );
+          $most_recent_result = RFIDResourceController::CTRLRFIDRSLT_DENY;
         }
 
         break;
       case self::CTRLSTATE_ADMIN:  // this is worth while?  too much trouble?
+        $most_recent_result = RFIDResourceController::CTRLRFIDRSLT_ADMIN;
         break;
+      default:
+        $most_recent_result = RFIDResourceController::CTRLRFIDRSLT_UNKON;
+        $this->fdlog->log_doordeny_event( $e, $reason );
+        break;
+
       }
     }
     else
-      error_log(__CLASS__.'::'.__FUNCTION__.' received badly-formed key');
+    {
+      if( $most_recent_result === RFIDResourceController::CTRLRFIDRSLT_BADKY )
+        $rcvd_badlyformed_intandem_count++;
+      else
+        $rcvd_badlyformed_intandem_count = 0;
+
+      $most_recent_result = RFIDResourceController::CTRLRFIDRSLT_BADKY;
+
+      $msg = 'received badly-formed key. parsed:"'.$e->get_key().'"  raw:"'.$e->get_rawkey().'"';
+      error_log(__CLASS__.'::'.__FUNCTION__." $msg");
+      $this->fdlog->log_doordeny_event( $e, 'malformed', null, $msg );
+
+      if( $rcvd_badlyformed_intandem_count > 2 )
+      {
+        error_log(__CLASS__.'::'.__FUNCTION__.' received more than one malformed key event. attempting server reset.');
+        exit(0);
+      }
+    }
+
+    return $most_recent_result;
   }
 }
 

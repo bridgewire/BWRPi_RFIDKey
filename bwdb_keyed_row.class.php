@@ -24,6 +24,10 @@ class bwdb_column
   public $upd_expr;
   public $val;
   public $hasval;
+  public $isparam;  // boolean. true if we use bindParam to tie the variable to the statement.
+                    // Otherwise the value is added directly to the sql statement, unquoted.
+                    // You want to set this to false, for insatance, when you want to set a
+                    // column's value to the result of a pure sql function like 'now()'.
   public $isfromdb;
 //  public $oldval;
 //  public $hasoldval;
@@ -38,10 +42,11 @@ class bwdb_column
     $this->upd_expr = ($updateexpr !== null ? $updateexpr : $name);
     $this->val      = $val;
     $this->hasval   = $has_val;
+    $this->isparam  = true;
     $this->updateable = $updtbl;
     $this->insertable = $inrtble;
   }
-  public function setvalue( $val, $has_val=true )
+  public function setvalue( $val, $has_val=true, $is_param=true )
   {
     //if( $this->hasval && ! $this->hasoldval )
     //{
@@ -49,11 +54,12 @@ class bwdb_column
     //  $this->hasoldval = true;
     //}
 
-    if( $has_val && $this->isfromdb && $val !== $this->val )
+    if( ! $has_val || ($this->isfromdb && $val !== $this->val) )
       $this->isfromdb = false;
 
     $this->val = $val;
     $this->hasval = $has_val; 
+    $this->isparam = $is_param; 
   }
   public function setvalue_fromselect( $val )
   {
@@ -62,12 +68,13 @@ class bwdb_column
     $this->val = $val;
     $this->hasval = true;
     $this->isfromdb = true;
+    $this->isparam = true;  // real, simple data is always treated like a parameter
   }
 
-  public function __toString(){ return $this->sel_expr.' == '.$this->val; }
+  public function __toString(){ return $this->sel_expr.' = '.$this->val; }
 }
 
-abstract class bwdb_keyed_row
+abstract class bwdb_keyed_row extends ArrayObject
 {
   // this class (hopefully) makes it easy to focus on data rather than on sql.
   // The model is row-centric, as opposed to cursor table centric though this
@@ -86,8 +93,9 @@ abstract class bwdb_keyed_row
 
   // these are for internal use, but aren't 'private' so that subclasses have access
   protected $col_nums = array();
-  protected $isfromdb = false;    // true data came from a select execution.
+  protected $isfromdb = false;    // if true, data came from a select execution.
 
+  public function isFromDB() { return $this->isfromdb; }
 
   // even though this class is abstract it make sense to give it a constructor.
   // the constructor will fail if it is not called via the parent::__construct
@@ -108,7 +116,6 @@ abstract class bwdb_keyed_row
 
     if( $this->keycol->hasval ) 
       $this->do_select();
-
   }
 
   public function __toString()
@@ -123,13 +130,27 @@ abstract class bwdb_keyed_row
     return $str;
   }
 
-  public function auto_select_statement()
+  public function auto_select_statement( $include_keycol=false, $supress_where_expression=false )
   {
     $sql = 'select ';
-    for( $i=0; $i < count( $this->cols ); $i++ )
-      $sql .= ($i === 0 ? '' : ', ' ).$this->cols[$i]->sel_expr;
 
-    $sql .= ' from '.$this->table_name.' where '.$this->keycol->sel_expr.' = ?';
+    $c = 0;
+    if( $include_keycol )
+    {
+      $sql .= $this->keycol->sel_expr;
+      $c++;
+    }
+
+    for( $i=0; $i < count( $this->cols ); $i++ )
+    {
+      $sql .= ($c === 0 ? '' : ', ' ).$this->cols[$i]->sel_expr;
+      $c++;
+    }
+
+    $sql .= ' from '.$this->table_name;
+
+    if( ! $supress_where_expression )
+      $sql .= ' where '.$this->keycol->sel_expr.' = ?';
     return $sql;
   }
 
@@ -149,7 +170,6 @@ abstract class bwdb_keyed_row
       if( $row )
       {
         $rows = count($row);
-        //error_log('debug: rows == '.$rows);
         if( $rows > 0 )  // sanity check
         {
           $success = true;
@@ -163,6 +183,43 @@ abstract class bwdb_keyed_row
     $this->isfromdb = $success;
 
     return $success;  // or throw?
+  }
+
+  public function do_search( $where_clause, $where_values=null )
+  {
+    $success = false;
+
+    $sql = $this->auto_select_statement( true, true );
+
+    if( ! preg_match( '/^\s*where\s+/i', $where_clause ) )
+      $sql .= ' where ';
+    $sql .= $where_clause;
+
+    $dbh = bwdb_connection::instance();
+    $stmt = $dbh->prepare( $sql );
+    if( $where_values === null )
+      $stmt->execute();
+    else
+      $stmt->execute( $where_values );
+    $row = $stmt->fetch( PDO::FETCH_NUM );
+
+    if( $row )
+    {
+      $rows = count($row);
+      if( $rows > 0 )  // sanity check
+      {
+        $success = true;
+        $this->keycol->setvalue_fromselect( $row[0] );
+        for( $i = 1; $i < $rows; $i++ )
+          $this->cols[$i-1]->setvalue_fromselect( $row[$i] );
+      }
+    }
+    $stmt->closeCursor(); // necessary?
+
+    $this->isfromdb = $success;
+
+    return $success;  // or throw?
+
   }
 
   public function auto_insert_statement()
@@ -183,7 +240,12 @@ abstract class bwdb_keyed_row
       if( $this->cols[$i]->insertable && $this->cols[$i]->hasval )
       {
         $sql       .= ($c === 0 ? ''  : ', '  ).$this->cols[$i]->ins_expr;
-        $vals_list .= ($c === 0 ? ':' : ', :' ).$this->cols[$i]->ins_expr ;
+
+        if( $this->cols[$i]->isparam )
+          $vals_list .= ($c === 0 ? ':' : ', :' ).$this->cols[$i]->ins_expr ;
+        else
+          $vals_list .= ($c === 0 ? '' : ', ' ).$this->cols[$i]->val;
+
         $c++;
       }
     }
@@ -220,6 +282,7 @@ abstract class bwdb_keyed_row
       {
         $dbh = bwdb_connection::instance();
         $stmt = $dbh->prepare( $sql );
+
         $c = 0;
 
         if( $this->keycol->insertable )
@@ -230,7 +293,7 @@ abstract class bwdb_keyed_row
 
         for( $i=0; $i < count( $this->cols ); $i++ )
         {
-          if( $this->cols[$i]->insertable && $this->cols[$i]->hasval )
+          if( $this->cols[$i]->insertable && $this->cols[$i]->hasval && $this->cols[$i]->isparam )
           {
             $stmt->bindParam( ':'.$this->cols[$i]->ins_expr, $this->cols[$i]->val );
             $c++;
@@ -242,10 +305,10 @@ abstract class bwdb_keyed_row
           if( ! $this->keycol->insertable )
           {
             $this->keycol->val = $dbh->lastInsertId();
-            //error_log('debug: after insert with non-insertable key, key value is: '.$this->keycol->val );
             assert( preg_match('/^\d+$/', $this->keycol->val) );
             $this->keycol->hasval = true;
           }
+
           $success = true;
         }
       }
@@ -264,11 +327,22 @@ abstract class bwdb_keyed_row
     {
       if( $this->cols[$i]->updateable &&  $this->cols[$i]->hasval && ! $this->cols[$i]->isfromdb )
       {
-        $sql .= ($c === 0 ? '' : ', ' ).$this->cols[$i]->upd_expr .' = :'.$this->cols[$i]->upd_expr;
+        $sql .= ($c === 0 ? '' : ', ' ).$this->cols[$i]->upd_expr .' = ';
+        if( $this->cols[$i]->isparam )
+          $sql .= ':'.$this->cols[$i]->upd_expr;
+        else
+          $sql .= $this->cols[$i]->val;
+
         $c++;
       }
     }
-    $sql .= ' where '.$this->keycol->upd_expr.' = '.$this->keycol->val;
+    $sql .= ' where '.$this->keycol->upd_expr.' = ';
+      
+    if( $this->keycol->isparam )
+      $sql .= ':'.$this->keycol->upd_expr;
+    else
+      $sql .= $this->keycol->val;
+
 
     if( $c == 0 )
       $sql = null;
@@ -291,12 +365,15 @@ abstract class bwdb_keyed_row
         $c = 0;
         for( $i=0; $i < count( $this->cols ); $i++ )
         {
-          if( $this->cols[$i]->updateable && $this->cols[$i]->hasval && ! $this->cols[$i]->isfromdb )
+          if( $this->cols[$i]->updateable && $this->cols[$i]->hasval && ! $this->cols[$i]->isfromdb && $this->cols[$i]->isparam )
           {
             $stmt->bindParam( ':'.$this->cols[$i]->upd_expr, $this->cols[$i]->val );
             $c++;
           }
         }
+
+        if( $this->keycol->isparam )
+          $stmt->bindParam( ':'.$this->keycol->upd_expr, $this->keycol->val );
 
         if( $c > 0 && $stmt->execute() )
           $success = true;
@@ -337,70 +414,100 @@ abstract class bwdb_keyed_row
   }
 
   // short way to 'get' the value of a single column
-  // instead of returning true or false this throws an exception on any failure
-  public function g( $c )
+  // a shorter way is $this["column"], the extension of ArrayObject in offsetGet()
+  public function g( $c, &$v )
   {
+    $success = false;
     if( $c === $this->keycol->colname )
-    {
-      $v=null;
-      if( $this->get_key_value( $v ) )
-        return $v;
-    }
+      $success = $this->get_key_value( $v );
     else
     {
       $i = -1;
       if( ! is_int( $c ) && isset( $this->col_nums[ $c ] ) )
           $i = $this->col_nums[ $c ];
-      elseif( is_int( $c ) && $c >= 0 && $c <= count($this->cols) )
-        $i = $k;
+      elseif( is_int( $c ) && $c >= 0 && $c < count($this->cols) )
+        $i = $c;
 
-      if( $i > -1 && $this->cols[ $i ]->hasval )
-        return $this->cols[ $i ]->val;
+      if( $i == -1 )
+        throw new Exception(__FILE__.':'.__LINE__.': the specified column: '.$c.' does not exist');
+
+      if( $this->cols[ $i ]->hasval )
+      {
+        $success = true;
+        $v = $this->cols[ $i ]->val;
+      }
     }
 
-    // else
-    throw new Exception(__FILE__.':'.__LINE__.': either the specified column: '.$c.' does not exist, or it has no value to get');
+    return $success;
   }
 
-  // short way to 'set' the value of a single column
-  //
   // // example:
   // require("bwdb_rowdefs.php");
-  // $ck = new cardkey_row("4F-00-A8-F9-76-68"); $c="mmbr_id"; 
-  // $v = $ck->g($c);
-  // print( "$c equals: ".($v === null ? "null" : $v)."\n" );
+  // $ck = new cardkey_row("4F-00-A8-F9-76-68");
+  // $c="mmbr_id"; 
+  // $v = null;
+  // print( "column $c ".($ck->g($c, $v) ? ("equals: ".($v === null ? "null" : $v)) : "has no value" )."\n" );
   // $ck->s("RFID","4F-00-A8-E6-C1-C0");  // this is the table key, so updates row when it's set
-  // $v=$ck->g($c);
-  // print( "$c equals: ".($v === null ? "null" : $v)."\n" );  '
+  // print( "column $c ".($ck->g($c, $v) ? ("equals: ".($v === null ? "null" : $v)) : "has no value" )."\n" );
   //
-  public function s( $c, $v, $refresh_data=true )
+  // short way to 'set' the value of a single column
+  public function s( $c, $v, $refresh_data=true, $isparam=true )
   {
     if( $c === $this->keycol->colname )
     {
-      $this->isfromdb = false; // if( $refresh_data ) then this will likely be true upon return
+      $this->isfromdb = false;                    // if( $refresh_data ) then isfromdb should be true upon return
       $this->set_key_value( $v, $refresh_data );
-      return;
     }
 
     $i = -1;
     if( ! is_int( $c ) && isset( $this->col_nums[ $c ] )  )
       $i = $this->col_nums[ $c ];
     elseif( is_int( $c ) && $c >= 0 && $c <= count($this->cols) )
-      $i = $k;
+      $i = $c;
 
-    if( $i > -1 )
+
+    if( $i == -1 )
+      throw new Exception(__FILE__.':'.__LINE__.': the specified column: '.$c.' does not exist');
+
+    $this->isfromdb = false; // if anything changes, the row is not strictly from db.
+    $this->cols[ $i ]->setvalue( $v, true, $isparam );
+  }
+
+  // short way to 'unset' the value of a single column
+  public function u( $c )
+  {
+    $success = false;
+    if( $c === $this->keycol->colname )
     {
-      $this->isfromdb = false; // if anything changes, the row is not strictly from db.
-      $this->cols[ $i ]->setvalue( $v );
+      $this->unset_key_value();
+      $success = true;
     }
     else
-      throw new Exception(__FILE__.':'.__LINE__.': the specified column: '.$c.' does not exist');
+    {
+      $i = -1;
+      if( ! is_int( $c ) && isset( $this->col_nums[ $c ] ) )
+          $i = $this->col_nums[ $c ];
+      elseif( is_int( $c ) && $c >= 0 && $c < count($this->cols) )
+        $i = $c;
+
+      if( $i == -1 )
+        throw new Exception(__FILE__.':'.__LINE__.': the specified column: '.$c.' does not exist');
+
+      if( $this->cols[ $i ]->hasval )
+      {
+        $this->cols[$i]->setvalue( null, false );
+        $success = true;
+      }
+    }
+
+    return $success;
   }
 
 
-  public function set_col_values( $colvals )
+
+  public function unset_col_values( $colvals )
   {
-    $set_count = 0; // XXX this is not actually useful, because if($get_count !== count($colvals)) then throw
+    $set_count = 0;
     $cc = count($this->cols);
 
     foreach( $colvals as $k => $v )
@@ -414,19 +521,17 @@ abstract class bwdb_keyed_row
 
       if( $i > -1 )
       {
-        $this->isfromdb = false;
-        $this->cols[ $i ]->setvalue( $v );
+        $this->cols[$i]->setvalue( null, false );
         $set_count++;
       }
-      else
-        throw new Exception("no such column: \"$k\" in ".__CLASS__);
     }
     return $set_count;
   }
 
-  public function get_col_values( &$colvals )
+
+  public function set_col_values( $colvals )
   {
-    $get_count = 0; // XXX this is not actually useful, because if($get_count !== count($colvals)) then throw
+    $set_count = 0;
     $cc = count($this->cols);
 
     foreach( $colvals as $k => $v )
@@ -438,18 +543,65 @@ abstract class bwdb_keyed_row
       elseif( is_int( $k ) && $k >= 0 && $k < $cc )
         $i = $k;
 
-      if( $i < 0 )
-        throw new Exception("no such column: \"$k\" in ".__CLASS__);
-
-      $colvals[$k] = $this->cols[$i]->val;
-      $get_count++;
+      # only set the keys in cols[] that we have a corresponding key for in $colvals[]
+      if( $i > -1 )
+      {
+        $this->isfromdb = false;
+        $this->cols[ $i ]->setvalue( $v );
+        $set_count++;
+      }
     }
-    return $get_count;
+    return $set_count;
+  }
+
+  public function get_col_values( &$colvals )
+  {
+    $got_count = 0;
+    $cc = count($this->cols);
+
+    foreach( $colvals as $k => $v )
+    {
+      $i = -1;
+
+      if( ! is_int($k) && isset( $this->col_nums[ $k ] ) )
+        $i = $this->col_nums[ $k ];
+      elseif( is_int( $k ) && $k >= 0 && $k < $cc )
+        $i = $k;
+
+      # only set the keys in colvals[] that we have a corresponding key for
+      if( $i != -1 && $this->cols[$i]->hasval )
+      {
+        $got_count++;
+        $colvals[$k] = $this->cols[$i]->val;
+      }
+    }
+    return $got_count;
   }
 
   public function found_in_db()
   {
     return $this->isfromdb;
+  }
+
+  // ArrayObject interface implemenation
+  public function offsetGet($i) { $v=null; $this->g( $i, $v ); return $v; }
+  public function offsetSet($i,$v) { $this->s( $i, $v ); }
+  public function offsetUnset($i) { $this->u($i); }
+  public function offsetExists($c)
+  { 
+    $exists = ( $c === $this->keycol->colname );
+    if( ! $exists )
+    {
+      $i = -1;
+      if( ! is_int( $c ) && isset( $this->col_nums[ $c ] )  )
+        $i = $this->col_nums[ $c ];
+      elseif( is_int( $c ) && $c >= 0 && $c <= count($this->cols) )
+        $i = $c;
+
+      $exists = ( $i !== -1 );
+    }
+
+    return $exists;
   }
 }
 

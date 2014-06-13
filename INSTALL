@@ -1,0 +1,32 @@
+Create a directory:
+
+/home/pi/frontdoord
+
+and copy everything into it.
+
+Update all passwords and URLs so match the installation site.  (I know this is
+not very helpful.)  update_cardkeytab_from_site_if_needed.php mentioned below
+as a cron-job will only be useful if you have a remote user database, so is
+altogether optional, of course.
+
+
+Add the following cron jobs using '$ crontab -e'
+
+
+# Crontab entries
+# ----------------------------------------------------------------------------------------
+# this is the starting point for the frontdoor managing daemon
+# this command runs once a minute, every minute of every day
+# the command itself checks if it needs to execute the manager and
+# if not it dies
+* * * * * /home/pi/frontdoord/frontdoord.sh > /dev/null 2>&1 &
+
+
+# once a minute, check the site to see if the cardkey db needs
+# to be updated because of some newly paid dues.
+* * * * * /usr/bin/php /home/pi/frontdoord/update_cardkeytab_from_site_if_needed.php 2>&1  | logger -i -t cardkeycheck --
+# ----------------------------------------------------------------------------------------
+
+
+
+
